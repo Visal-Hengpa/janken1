@@ -50,7 +50,7 @@
 
     <ul>
         <li><a href="./janken.php">じゃんけんゲーム</a></li>
-        <li><a href="./janken.php">じゃんけんゲーム</a></li>
+        <li><a href="./block_game.php">Block Game</a></li>
         <li><a href="./janken.php">じゃんけんゲーム</a></li>
         
     </ul>
