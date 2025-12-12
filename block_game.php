@@ -11,6 +11,7 @@ define('EMPTY_CELL', '.');
 
 function init_game() {
     $board = array_fill(0, BOARD_SIZE, array_fill(0, BOARD_SIZE, EMPTY_CELL));
+    
     // Machine on top (row 0), Human on bottom (row 3)
     for ($c = 0; $c < BOARD_SIZE; $c++) {
         $board[0][$c] = MACHINE;
@@ -20,16 +21,62 @@ function init_game() {
         'board' => $board,
         'message' => "Your Turn! Click a Green piece to select it.",
         'game_over' => false,
-        'selected' => null // Stores coordinates of piece user clicked: [row, col]
+        'winner' => null,
+        'selected' => null
     ];
 }
 
-// Get all valid moves for a specific player (or specific piece)
+// Check specifically if ONE piece is trapped
+function is_piece_trapped($board, $r, $c) {
+    $directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+    foreach ($directions as $d) {
+        $nr = $r + $d[0];
+        $nc = $c + $d[1];
+        // If there is at least one valid neighbor (inside board AND empty)
+        if ($nr >= 0 && $nr < BOARD_SIZE && $nc >= 0 && $nc < BOARD_SIZE) {
+            if ($board[$nr][$nc] === EMPTY_CELL) {
+                return false; // It has a move, so it is NOT trapped
+            }
+        }
+    }
+    return true; // No empty neighbors, it is trapped
+}
+
+// NEW FUNCTION: Removes pieces that cannot move
+function remove_trapped_pieces(&$board) {
+    $removed_human = 0;
+    $removed_machine = 0;
+
+    // We must identify all trapped pieces FIRST, then remove them.
+    // Otherwise, removing one might free up another during the loop.
+    $to_remove = [];
+
+    for ($r = 0; $r < BOARD_SIZE; $r++) {
+        for ($c = 0; $c < BOARD_SIZE; $c++) {
+            $piece = $board[$r][$c];
+            if ($piece !== EMPTY_CELL) {
+                if (is_piece_trapped($board, $r, $c)) {
+                    $to_remove[] = [$r, $c, $piece];
+                }
+            }
+        }
+    }
+
+    foreach ($to_remove as $item) {
+        $r = $item[0]; $c = $item[1]; $p = $item[2];
+        $board[$r][$c] = EMPTY_CELL; // Remove piece
+        
+        if ($p === HUMAN) $removed_human++;
+        if ($p === MACHINE) $removed_machine++;
+    }
+
+    return ['H' => $removed_human, 'M' => $removed_machine];
+}
+
 function get_valid_moves($board, $player, $specific_piece = null) {
     $moves = [];
-    $directions = [[-1, 0], [1, 0], [0, -1], [0, 1]]; // Up, Down, Left, Right
+    $directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
 
-    // Find pieces
     $pieces = [];
     if ($specific_piece) {
         $pieces[] = $specific_piece;
@@ -66,7 +113,17 @@ function make_move(&$board, $move) {
     $board[$tr][$tc] = $piece;
 }
 
-// AI: Maximizes its freedom, minimizes yours
+function count_pieces($board, $player) {
+    $count = 0;
+    for ($r = 0; $r < BOARD_SIZE; $r++) {
+        for ($c = 0; $c < BOARD_SIZE; $c++) {
+            if ($board[$r][$c] === $player) $count++;
+        }
+    }
+    return $count;
+}
+
+// AI: Maximizes its freedom, minimizes yours, AVOIDS getting trapped
 function get_machine_move($board) {
     $moves = get_valid_moves($board, MACHINE);
     if (empty($moves)) return null;
@@ -78,11 +135,20 @@ function get_machine_move($board) {
         $temp_board = $board;
         make_move($temp_board, $move);
         
-        // Score: My Moves - Your Moves
-        $my_options = count(get_valid_moves($temp_board, MACHINE));
-        $human_options = count(get_valid_moves($temp_board, HUMAN));
+        // Simulate immediate removal if this move traps anyone
+        remove_trapped_pieces($temp_board);
+
+        $my_pieces = count_pieces($temp_board, MACHINE);
+        $human_pieces = count_pieces($temp_board, HUMAN);
         
-        $score = $my_options - ($human_options * 1.5); // Weight blocking human higher
+        // Scoring logic:
+        // 1. Keep my pieces alive (High priority)
+        // 2. Kill human pieces (High priority)
+        // 3. Keep mobility high
+        
+        $my_options = count(get_valid_moves($temp_board, MACHINE));
+        
+        $score = ($my_pieces * 10) - ($human_pieces * 10) + $my_options;
 
         if ($score > $best_score) {
             $best_score = $score;
@@ -94,7 +160,6 @@ function get_machine_move($board) {
 
 // --- Request Handling ---
 
-// Reset Game
 if (!isset($_SESSION['game']) || isset($_GET['reset'])) {
     $_SESSION['game'] = init_game();
     header("Location: " . $_SERVER['PHP_SELF']);
@@ -103,69 +168,85 @@ if (!isset($_SESSION['game']) || isset($_GET['reset'])) {
 
 $game = &$_SESSION['game'];
 
-// Handle User Input
 if (!$game['game_over'] && isset($_GET['action'])) {
     
-    // 1. User Selects a Piece
+    // Select Piece
     if ($_GET['action'] == 'select') {
         $r = (int)$_GET['r'];
         $c = (int)$_GET['c'];
         if ($game['board'][$r][$c] === HUMAN) {
             $game['selected'] = [$r, $c];
-            $game['message'] = "Piece selected. Click an empty spot to move.";
+            $game['message'] = "Piece selected.";
         }
     }
     
-    // 2. User Moves to a spot
+    // Move Piece
     if ($_GET['action'] == 'move' && $game['selected']) {
         $to_r = (int)$_GET['r'];
         $to_c = (int)$_GET['c'];
         $from_r = $game['selected'][0];
         $from_c = $game['selected'][1];
 
-        // Validate Move (must be distance of 1)
         if (abs($from_r - $to_r) + abs($from_c - $to_c) === 1 && $game['board'][$to_r][$to_c] === EMPTY_CELL) {
             
-            // Execute Human Move
+            // 1. HUMAN MOVES
             make_move($game['board'], ['from' => [$from_r, $from_c], 'to' => [$to_r, $to_c]]);
             $game['selected'] = null;
             
-            // Check if Human Won (Machine blocked?)
-            $machine_moves = get_valid_moves($game['board'], MACHINE);
-            if (empty($machine_moves)) {
+            // 2. CHECK & REMOVE TRAPPED PIECES
+            $removed = remove_trapped_pieces($game['board']);
+            $msg_add = "";
+            if ($removed['M'] > 0) $msg_add .= " You captured " . $removed['M'] . " AI piece(s)!";
+            if ($removed['H'] > 0) $msg_add .= " You lost " . $removed['H'] . " piece(s)!";
+
+            // 3. CHECK VICTORY (Human)
+            if (count_pieces($game['board'], MACHINE) == 0) {
                 $game['game_over'] = true;
-                $game['message'] = "VICTORY! The Machine cannot move.";
+                $game['message'] = "VICTORY! All AI pieces captured.";
             } else {
-                // Machine Turn
-                $ai_move = get_machine_move($game['board']);
-                make_move($game['board'], $ai_move);
                 
-                // Check if Machine Won (Human blocked?)
-                $human_moves = get_valid_moves($game['board'], HUMAN);
-                if (empty($human_moves)) {
-                    $game['game_over'] = true;
-                    $game['message'] = "DEFEAT! You are blocked. The Machine wins.";
+                // 4. MACHINE MOVES
+                $ai_move = get_machine_move($game['board']);
+                
+                if ($ai_move) {
+                    make_move($game['board'], $ai_move);
+                    
+                    // 5. CHECK & REMOVE TRAPPED PIECES AGAIN
+                    $removed_2 = remove_trapped_pieces($game['board']);
+                    if ($removed_2['H'] > 0) $msg_add .= " AI captured your piece!";
+                    
+                    // 6. CHECK VICTORY (Machine)
+                    if (count_pieces($game['board'], HUMAN) == 0) {
+                        $game['game_over'] = true;
+                        $game['message'] = "DEFEAT! All your pieces were captured.";
+                    } else {
+                        $game['message'] = "Machine moved." . $msg_add;
+                    }
                 } else {
-                    $game['message'] = "Machine moved. Your turn!";
+                    // Machine has pieces but NO moves (Stalemate/Win condition depending on preference)
+                    // In this version, if AI cannot move but is not dead yet, it passes turn or loses.
+                    // Let's rule that if you can't move, you lose.
+                    $game['game_over'] = true;
+                    $game['message'] = "VICTORY! Machine is stuck.";
                 }
             }
         }
     }
 }
-
 ?>
+
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Blocking Game (PHP)</title>
+    <title>Elimination Game</title>
     <style>
-        body { font-family: sans-serif; text-align: center; background: #f0f0f0; }
-        h1 { color: #333; }
+        body { font-family: sans-serif; text-align: center; background: #222; color: white;}
+        h1 { margin-bottom: 5px; }
         .board { 
             display: grid; 
             grid-template-columns: repeat(4, 80px); 
             gap: 5px; 
-            background: #333; 
+            background: #444; 
             width: 345px; 
             margin: 20px auto; 
             padding: 5px;
@@ -173,34 +254,31 @@ if (!$game['game_over'] && isset($_GET['action'])) {
         }
         .cell {
             width: 80px; height: 80px;
-            background: #fff;
+            background: #eee;
             display: flex; align-items: center; justify-content: center;
-            font-size: 24px; font-weight: bold;
-            text-decoration: none; color: #333;
+            text-decoration: none; position: relative;
         }
-        .human { background-color: #4CAF50; color: white; border-radius: 50%; width: 60px; height: 60px; display:flex; align-items:center; justify-content:center;}
-        .machine { background-color: #F44336; color: white; border-radius: 50%; width: 60px; height: 60px; display:flex; align-items:center; justify-content:center;}
+        .human { background-color: #2E7D32; color: white; border-radius: 50%; width: 60px; height: 60px; display:flex; align-items:center; justify-content:center; font-weight:bold;}
+        .machine { background-color: #c62828; color: white; border-radius: 50%; width: 60px; height: 60px; display:flex; align-items:center; justify-content:center; font-weight:bold;}
         .selected { border: 4px solid #FFD700; box-shadow: 0 0 10px #FFD700; }
-        .valid-move { background-color: #e0e0e0; cursor: pointer; }
-        .valid-move:hover { background-color: #81C784; }
-        .status { margin: 20px; font-size: 1.2em; color: #555; }
-        .btn { padding: 10px 20px; background: #333; color: #fff; text-decoration: none; border-radius: 5px;}
+        .valid-move { background-color: #ddd; }
+        .dot { width: 20px; height: 20px; background: #2E7D32; border-radius: 50%; opacity: 0.5; }
+        .status { margin: 15px; font-size: 1.2em; color: #bbb; height: 30px;}
+        .btn { padding: 10px 20px; background: #555; color: #fff; text-decoration: none; border-radius: 5px; border: 1px solid #777;}
+        .btn:hover { background: #777; }
     </style>
 </head>
 <body>
 
-    <h1>The Blocking Game</h1>
+    <h1>Elimination Tactics</h1>
     <div class="status"><?php echo $game['message']; ?></div>
 
     <div class="board">
         <?php 
         $valid_destinations = [];
-        // If a piece is selected, calculate where it can go for highlighting
         if ($game['selected']) {
             $possible_moves = get_valid_moves($game['board'], HUMAN, $game['selected']);
-            foreach ($possible_moves as $m) {
-                $valid_destinations[$m['to'][0] . '_' . $m['to'][1]] = true;
-            }
+            foreach ($possible_moves as $m) $valid_destinations[$m['to'][0] . '_' . $m['to'][1]] = true;
         }
 
         for ($r = 0; $r < BOARD_SIZE; $r++): 
@@ -209,31 +287,18 @@ if (!$game['game_over'] && isset($_GET['action'])) {
                 $is_selected = ($game['selected'] && $game['selected'][0] == $r && $game['selected'][1] == $c);
                 $is_valid_dest = isset($valid_destinations[$r.'_'.$c]);
                 
-                // Determine CSS classes
-                $classes = "cell";
-                if ($is_valid_dest) $classes .= " valid-move";
-                
-                // Determine Link URL
                 $link = null;
                 if (!$game['game_over']) {
-                    if ($cell === HUMAN) {
-                        $link = "?action=select&r=$r&c=$c";
-                    } elseif ($is_valid_dest) {
-                        $link = "?action=move&r=$r&c=$c";
-                    }
+                    if ($cell === HUMAN) $link = "?action=select&r=$r&c=$c";
+                    elseif ($is_valid_dest) $link = "?action=move&r=$r&c=$c";
                 }
                 
-                // Render Cell
-                echo "<div class='$classes'>";
-                if ($link) echo "<a href='$link' style='display:block; width:100%; height:100%; display:flex; align-items:center; justify-content:center; text-decoration:none;'>";
+                echo "<div class='cell " . ($is_valid_dest ? "valid-move" : "") . "'>";
+                if ($link) echo "<a href='$link' style='width:100%; height:100%; display:flex; align-items:center; justify-content:center; text-decoration:none;'>";
                 
-                if ($cell === HUMAN) {
-                    echo "<div class='human " . ($is_selected ? 'selected' : '') . "'>You</div>";
-                } elseif ($cell === MACHINE) {
-                    echo "<div class='machine'>AI</div>";
-                } elseif ($is_valid_dest) {
-                    echo "<div style='width:20px; height:20px; background:#81C784; border-radius:50%;'></div>";
-                }
+                if ($cell === HUMAN) echo "<div class='human " . ($is_selected ? 'selected' : '') . "'>You</div>";
+                elseif ($cell === MACHINE) echo "<div class='machine'>AI</div>";
+                elseif ($is_valid_dest) echo "<div class='dot'></div>";
                 
                 if ($link) echo "</a>";
                 echo "</div>";
@@ -242,7 +307,6 @@ if (!$game['game_over'] && isset($_GET['action'])) {
         ?>
     </div>
 
-    <br>
     <a href="?reset=1" class="btn">Restart Game</a>
 
 </body>
